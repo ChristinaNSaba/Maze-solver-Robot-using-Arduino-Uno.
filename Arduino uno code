@@ -1,0 +1,457 @@
+#include <Arduino.h>
+#include <L298N.h>
+#include <PinChangeInterrupt.h>
+
+
+// Pins for motor control
+#define leftMotor1 6
+#define leftMotor2 7
+#define leftMotorPWM 11
+#define rightMotor1 8
+#define rightMotor2 9
+#define rightMotorPWM 5
+//0.25 = PPS / PPR = 250/1000
+#define kp 0.25
+
+
+// Pins for sensors
+const int trigPin = A1;  // Ultrasonic sensor trigger pin
+const int echoPin = A0;  // Ultrasonic sensor echo pin
+const int IRpinL = 12;   // Left IR sensor pin
+const int IRpinR = 13;   // Right IR sensor pin
+const int encoderLeftC1 = 3; // Left motor encoder pin 1
+const int encoderLeftC2 = 4; // Left motor encoder pin 2
+const int encoderRightC1 = 2; // Right motor encoder pin 1
+const int encoderRightC2 = 10; // Right motor encoder pin 2
+
+volatile int prevEncoderLeftC1State = LOW;
+volatile int prevEncoderLeftC2State = LOW;
+volatile int prevEncoderRightC1State = LOW;
+volatile int prevEncoderRightC2State = LOW;
+
+
+L298N motorL(11, leftMotor1, leftMotor2);
+L298N motorR(5, rightMotor1, rightMotor2);
+
+int frontDistance;
+bool leftIR;
+bool rightIR;
+
+const int MAX_PATH_LENGTH = 300;
+char path[MAX_PATH_LENGTH]; 
+int path_size = 0;
+int path_ind = 0;
+
+
+// Threshold distances for obstacle detection
+const int obstacleThreshold = 10;  // Distance threshold for ultrasonic sensor
+const int IRThreshold = 500;       // Threshold value for IR sensor
+
+
+// Base motor speeds
+const int baseSpeed = 150;
+
+
+// Variables to store encoder counts
+volatile long encoderLeftCount = 0;
+volatile long encoderRightCount = 0;
+void move_forward(){
+  digitalWrite(leftMotor1, HIGH);
+  digitalWrite(leftMotor2, LOW);
+  digitalWrite(rightMotor1, HIGH);
+  digitalWrite(rightMotor2, LOW);
+  analogWrite(rightMotorPWM, 60);
+  analogWrite(leftMotorPWM, 60);
+}
+
+void move_backward(){
+  digitalWrite(leftMotor1, LOW);
+  digitalWrite(leftMotor2, HIGH);
+  digitalWrite(rightMotor1, LOW);
+  digitalWrite(rightMotor2, HIGH);
+  analogWrite(rightMotorPWM, 60);
+  analogWrite(leftMotorPWM, 60);
+}
+
+void stop_moving(){
+  digitalWrite(leftMotor1, LOW);
+  digitalWrite(leftMotor2, LOW);
+  digitalWrite(rightMotor1, LOW);
+  digitalWrite(rightMotor2, LOW);
+}
+
+void resetReadings(){
+  frontDistance = 0;
+  leftIR = 0;
+  rightIR = 0;
+}
+
+void move_forward_corr(){
+  motorL.forward();
+  motorR.forward();
+}
+
+// Function to turn the robot 90 degrees in a specific direction
+void turn90(char dir) {
+  int turnDuration = 1000; // in pulses
+
+  // Set motor speeds and directions according to the desired direction
+  //R => right
+  //L => left
+  if (dir == 'R') {
+    motorR.setSpeed(100);
+    motorL.setSpeed(100);
+    motorR.backward();
+    motorL.forward();
+  } else {
+    motorR.setSpeed(100);
+    motorL.setSpeed(100);
+    motorR.forward();
+    motorL.backward();
+  }
+
+  //Allow the motors to turn for the specified duration
+  while ((abs(encoderLeftCount)+abs(encoderRightCount))/2 <= 250){
+    bool alive = 1;
+  }
+  delay(350);
+
+
+  // Stop the motors
+  motorR.stop();
+  motorL.stop();
+  encoderLeftCount = 0;
+  encoderRightCount = 0;
+}
+
+void traverse(){
+  while(path_ind != path_size){
+    // Read sensor values
+    resetReadings();
+    ReadAllSensors();
+
+    // Print sensor values for debugging
+    Serial.print("Front Distance: ");
+    Serial.print(frontDistance);
+    Serial.print("   Left IR: ");
+    Serial.print(leftIR);
+    Serial.print("   Right IR: ");
+    Serial.println(rightIR);
+
+    while(rightIR == 0 && leftIR == 0){
+      move_forward();
+      resetReadings();
+      ReadAllSensors();
+    }
+
+    stop_moving();
+
+
+    if(path[path_ind] == 'L'){
+      turn90('L');
+      move_forward();
+      delay(500);
+      stop_moving();
+      path_ind++;
+    }
+    else if(path[path_ind] == 'R'){
+      turn90('R');
+      move_forward();
+      delay(500);
+      stop_moving();
+      path_ind++;
+    }
+    else{
+      move_forward();
+      delay(500);
+      stop_moving();
+    }
+  }
+}
+
+void setup() {
+  // Initialize serial communication
+  Serial.begin(9600);
+
+
+  // Initialize motor control pins
+  pinMode(leftMotor1, OUTPUT);
+  pinMode(leftMotor2, OUTPUT);
+  pinMode(leftMotorPWM, OUTPUT);
+  pinMode(rightMotor1, OUTPUT);
+  pinMode(rightMotor2, OUTPUT);
+  pinMode(rightMotorPWM, OUTPUT);
+
+
+  // Initialize sensor pins
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(IRpinL, INPUT);
+  pinMode(IRpinR, INPUT);
+
+  // Left Motor Encoder - Pin Change Interrupts
+  //attachPCINT(digitalPinToPCINT(4), handleEncoder1, CHANGE);
+  //attachPCINT(digitalPinToPCINT(10), handleEncoder2, CHANGE);
+
+
+  // Initialize encoder pins
+  attachInterrupt(digitalPinToInterrupt(encoderRightC1), handleEncoder2, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(encoderLeftC1), handleEncoder1, CHANGE);
+}
+
+bool wall_Right(){
+  if(rightIR == 0){
+    return 1;
+  }
+  return 0;
+}
+
+bool wall_Left(){
+  if(leftIR == 0){
+    return 1;
+  }
+  return 0;
+}
+
+void move_slightly(char a){
+  if(a == 'R'){
+    int curr_speed_R = motorR.getSpeed();
+    analogWrite(rightMotorPWM, curr_speed_R+5);
+    int curr_speed_L = motorL.getSpeed();
+    analogWrite(leftMotorPWM, curr_speed_L-5);
+
+  }
+  else if(a == 'L'){
+    int curr_speed_R = motorR.getSpeed();
+    analogWrite(rightMotorPWM, curr_speed_R-5);
+    int curr_speed_L = motorL.getSpeed();
+    analogWrite(leftMotorPWM, curr_speed_L+5);
+  }
+  delay(500);
+}
+
+void testing(){
+  resetReadings();
+  ReadAllSensors();
+
+  move_forward();
+  while(1){
+    Serial.print(motorL.getSpeed());
+    Serial.print(' ');
+    Serial.print(motorR.getSpeed());
+    Serial.print("\n");
+    resetReadings();
+    ReadAllSensors();
+    if (frontDistance <= obstacleThreshold){
+      stop_moving();
+      break;
+    }  
+    if (wall_Right()){
+      move_slightly('L');
+    }
+    if (wall_Left()){
+      move_slightly('R');
+    }
+  }
+  stop_moving();
+}
+
+void loop() {
+
+  //testing();
+  resetReadings();
+  ReadAllSensors();
+  Serial.print(frontDistance);
+  Serial.print(" ");
+  Serial.print(rightIR);
+  Serial.print(" ");
+  Serial.print(leftIR);
+  Serial.print("\n");
+  move_forward();
+  while(frontDistance <= 15 ){
+    move_forward();
+    resetReadings();
+    ReadAllSensors();
+    if(frontDistance > 15){
+      stop_moving();
+    }
+  }
+
+  RightHand();
+
+  //solve();
+
+  //delay(20000);
+
+  //traverse();
+
+  // while (1){
+  //   bool a = 1;
+  // }
+}
+
+
+int readUltrasonicSensor() {
+  // Send ultrasonic pulse
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+
+  // Read echo pulse duration
+  long duration = pulseIn(echoPin, HIGH);
+
+
+  // Calculate distance based on the speed of sound
+  int distance = (duration/2) / 29.1;
+  return distance;
+}
+
+void handleEncoder1() {
+  if (digitalRead(encoderLeftC1) == digitalRead(encoderLeftC2)) {
+    encoderLeftCount++;
+  } else {
+    encoderLeftCount--;
+  }
+}
+
+void handleEncoder2() {
+  if (digitalRead(encoderRightC1) == digitalRead(encoderRightC2)) {
+    encoderRightCount++;
+  } else {
+    encoderRightCount--;
+  }
+}
+
+void ReadAllSensors(){
+  frontDistance = readUltrasonicSensor();
+  leftIR = digitalRead(IRpinL);
+  rightIR = digitalRead(IRpinR);
+}
+
+char finder(char a, char c){
+	if ((a == 'F' && c == 'R') || (a == 'R' && c == 'F')) return 'L';
+	else if ((a == 'R' && c == 'L') || (a == 'L' && c == 'R')) return 'B';
+	else if (a == 'R' && c == 'R') return 'F';
+	return 'N';
+}
+
+void solve(){
+	char stackarray[path_size+2];
+	int stacksize = 0;
+
+	for (int i = path_size-1; i >= 0; i--){
+		if (stacksize != 0 && stackarray[stacksize-1] == 'B'){
+			stacksize--;
+			char a = path[i], c = stackarray[stacksize-1];
+			char ch = finder(a, c);
+			stacksize--;
+			stackarray[stacksize++] = ch;
+		}
+		else if (path[i] == 'B'){
+			char a = path[i-1], c = stackarray[stacksize-1];
+			char ch = finder(a, c);
+			if (ch != 'N'){
+				stacksize--;
+				stackarray[stacksize++] = ch;
+				i--;	
+			}
+		}
+		else{
+			stackarray[stacksize++] = path[i];
+		}
+	}
+
+	path_size = stacksize;
+	for (int i = 0; i < path_size; i++){
+		path[i] = stackarray[--stacksize];
+	}
+}
+
+void RightHand(){
+  resetReadings();
+  ReadAllSensors();
+  while(frontDistance > obstacleThreshold){
+    move_forward();
+    resetReadings();
+    ReadAllSensors();
+  }
+  stop_moving();
+  // Print sensor values for debugging
+  Serial.print("Front Distance: ");
+  Serial.print(frontDistance);
+  Serial.print("   Left IR: ");
+  Serial.print(leftIR);
+  Serial.print("   Right IR: ");
+  Serial.println(rightIR);
+  while(1){
+    if(wall_Right() && wall_Left()){
+      move_forward();
+      resetReadings();
+      ReadAllSensors();
+    }
+    else if (!wall_Right()){
+      Serial.print("turning right\n");
+      turn90('R');
+      delay(500);
+      stop_moving();
+      resetReadings();
+      ReadAllSensors();
+      // save into path R
+      path[path_size++] = 'R';
+    }
+    else if (frontDistance > obstacleThreshold){
+      Serial.print("moving forward\n");
+      while (rightIR == 0 && frontDistance > obstacleThreshold){
+        move_forward();
+        resetReadings();
+        ReadAllSensors();
+      }
+      path[path_size++] = 'F';
+      // save into path F
+    }
+    else if(wall_Right() && frontDistance <= obstacleThreshold){
+      Serial.print("turning left\n");
+      if (!wall_Left()){
+        stop_moving();
+        turn90('L');
+        move_forward();
+        delay(500);
+        stop_moving();
+        path[path_size++] = 'L';
+        ReadAllSensors();
+      }
+      else {
+        stop_moving();
+        turn90('L');
+        delay(2000);
+        turn90('L');
+
+        move_forward();
+        delay(500);
+        stop_moving();
+        path[path_size++] = 'B';
+        ReadAllSensors();
+      }
+    }
+
+  }
+}
+
+void speedCorrection(int baseSpeed){
+  long leftEncoder = encoderLeftCount;
+  long rightEncoder = encoderRightCount;
+
+  int diff = leftEncoder - rightEncoder;
+
+  int adjust = diff * kp;
+
+  int leftSpeed = baseSpeed + adjust;
+  int rightSpeed = baseSpeed - adjust;
+
+  motorL.setSpeed(leftSpeed);
+  motorR.setSpeed(rightSpeed);
+}
+
